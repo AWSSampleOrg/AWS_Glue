@@ -1,0 +1,112 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: "AWS::Serverless-2016-10-31"
+Parameters:
+  SourceBucketName:
+    Type: String
+
+Resources:
+  SourceBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${SourceBucketName}
+
+  GlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: sample_database
+
+  GlueTable:
+    DependsOn:
+      - GlueDatabase
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref GlueDatabase
+      TableInput:
+        Name: sample_table
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          {
+            "classification": "csv",
+            "skip.header.line.count": 1,
+            "serialization.encoding": "UTF8",
+          }
+        PartitionKeys:
+          - Name: partition_year
+            Type: int
+          - Name: partition_month
+            Type: int
+          - Name: partition_date
+            Type: int
+        StorageDescriptor:
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          Columns:
+            - Name: device_id
+              Type: string
+            - Name: uuid
+              Type: bigint
+            - Name: appid
+              Type: bigint
+            - Name: country
+              Type: string
+            - Name: year
+              Type: int
+            - Name: month
+              Type: int
+            - Name: date
+              Type: int
+            - Name: hour
+              Type: int
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          Location: !Sub s3://${SourceBucket}/input
+          SerdeInfo:
+            Parameters:
+              field.delim: ","
+            SerializationLibrary: org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe
+
+  #-------------------------------------------------------
+  #   Lambda
+  #-------------------------------------------------------
+  AthenaLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: Lambda
+      FunctionName: AthenaLambda
+      Handler: lambda_handler.lambda_handler
+      MemorySize: 128
+      Role: !Sub ${LambdaRole.Arn}
+      Runtime: python3.9
+      Timeout: 60
+      Tracing: Active
+      Environment:
+        Variables:
+          LOG_LEVEL: DEBUG
+          OUTPUT_LOCATION: !Sub s3://${SourceBucket}/output
+          GLUE_DATABASE: !Sub ${GlueDatabase}
+          GLUE_TABLE: !Sub ${GlueTable}
+          GLUE_TABLE_LOCATION: !Sub s3://${SourceBucket}/input
+
+  # ------------------------------------------------------------#
+  # IAM
+  # ------------------------------------------------------------#
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSLambda_FullAccess
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AmazonAthenaFullAccess
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+      Path: /
+      RoleName: LambdaRole

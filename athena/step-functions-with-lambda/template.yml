@@ -1,0 +1,232 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: "AWS::Serverless-2016-10-31"
+Parameters:
+  SourceBucketName:
+    Type: String
+
+Resources:
+  SourceBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${SourceBucketName}
+
+  GlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: sample_database
+
+  GlueTable:
+    DependsOn:
+      - GlueDatabase
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref GlueDatabase
+      TableInput:
+        Name: sample_table
+        TableType: EXTERNAL_TABLE
+        Parameters: { "serialization.encoding": "UTF8" }
+        PartitionKeys:
+          - Name: partition_year
+            Type: string
+        StorageDescriptor:
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          Columns:
+            - Name: device_id
+              Type: string
+            - Name: uuid
+              Type: bigint
+            - Name: appid
+              Type: bigint
+            - Name: country
+              Type: string
+            - Name: year
+              Type: int
+            - Name: month
+              Type: int
+            - Name: date
+              Type: int
+            - Name: hour
+              Type: int
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          Location: !Sub s3://${SourceBucket}/input
+          SerdeInfo:
+            Parameters:
+              paths: device_id, uuid, appid, country, year, month, date, hour
+              case.insensitive: FALSE
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+
+  #-------------------------------------------------------
+  #   Lambda
+  #-------------------------------------------------------
+  RevalidatePartitionsLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: Lambda/revalidate-partitions
+      FunctionName: RevalidatePartitions
+      Handler: lambda_handler.lambda_handler
+      MemorySize: 128
+      Role: !Sub ${LambdaRole.Arn}
+      Runtime: python3.9
+      Timeout: 60
+      Tracing: Active
+      Environment:
+        Variables:
+          LOG_LEVEL: DEBUG
+          OUTPUT_LOCATION: !Sub s3://${SourceBucket}/output
+          GLUE_DATABASE: !Sub ${GlueDatabase}
+          GLUE_TABLE: !Sub ${GlueTable}
+          GLUE_TABLE_LOCATION: !Sub s3://${SourceBucket}/input
+
+  GetQueryLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: Lambda/get-query
+      FunctionName: GetQuery
+      Handler: lambda_handler.lambda_handler
+      MemorySize: 128
+      Role: !Sub ${LambdaRole.Arn}
+      Runtime: python3.9
+      Timeout: 10
+      Tracing: Active
+      Environment:
+        Variables:
+          LOG_LEVEL: DEBUG
+          OUTPUT_LOCATION: !Sub s3://${SourceBucket}/output
+          GLUE_DATABASE: !Sub ${GlueDatabase}
+          GLUE_TABLE: !Sub ${GlueTable}
+
+  # ------------------------------------------------------------#
+  # IAM
+  # ------------------------------------------------------------#
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSLambda_FullAccess
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AmazonAthenaFullAccess
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+      Path: /
+      RoleName: LambdaRole
+
+  StepFunctionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - states.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonAthenaFullAccess
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+      Policies:
+        - PolicyName: StepFunctionsPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !Sub ${RevalidatePartitionsLambda.Arn}
+                  - !Sub ${GetQueryLambda.Arn}
+      Path: /
+      RoleName: StepFunctionsRole
+
+  StepFunctions:
+    Type: AWS::StepFunctions::StateMachine
+    DependsOn:
+      - StepFunctionsRole
+    Properties:
+      StateMachineName: step-functions
+      DefinitionString: !Sub |-
+        {
+          "Comment": "Comprehend Tutorial state machine",
+          "StartAt": "RevalidatePartitions",
+          "TimeoutSeconds": 3600,
+          "States": {
+            "RevalidatePartitions": {
+              "Type": "Task",
+              "Resource": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${RevalidatePartitionsLambda}",
+              "Next": "GetQuery",
+              "ResultPath": null,
+              "Catch": [
+                {
+                  "ErrorEquals": ["QueryFailedException"],
+                  "Next": "Failed"
+                }
+              ]
+            },
+            "GetQuery": {
+              "Type": "Task",
+              "Resource": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${GetQueryLambda}",
+              "Next": "StartQuery",
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "Failed"
+                }
+              ]
+            },
+            "StartQuery": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::athena:startQueryExecution.sync",
+              "Parameters": {
+                "QueryString.$": "$.queryString",
+                "ResultConfiguration": {
+                  "OutputLocation.$": "$.outputLocation"
+                }
+              },
+              "ResultSelector": {
+                "status.$": "$.QueryExecution.Status.State",
+                "queryExecutionId.$": "$.QueryExecution.QueryExecutionId"
+              },
+              "Next": "GetQueryResults",
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "Failed"
+                }
+              ]
+            },
+            "GetQueryResults": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::athena:getQueryResults",
+              "Parameters": {
+                "QueryExecutionId.$": "$.queryExecutionId"
+              },
+              "ResultPath": "$.result",
+              "Next": "Succeed",
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "Failed"
+                }
+              ]
+            },
+            "Failed": {
+              "Type": "Fail"
+            },
+            "Succeed": {
+              "Type": "Succeed"
+            }
+          }
+        }
+      RoleArn: !Sub ${StepFunctionsRole.Arn}

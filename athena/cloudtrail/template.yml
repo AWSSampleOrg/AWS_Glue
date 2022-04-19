@@ -1,0 +1,168 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: "AWS::Serverless-2016-10-31"
+Parameters:
+  SourceBucketName:
+    Type: String
+  CloudTrailName:
+    Type: String
+    Default: cloudtrail
+
+Resources:
+  SourceBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${SourceBucketName}
+
+  GlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: sample_database
+
+  GlueTableForCloudTrails:
+    DependsOn:
+      - GlueDatabase
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref GlueDatabase
+      TableInput:
+        Name: sample_table
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          { "serialization.encoding": "UTF8", "classification": "cloudtrail" }
+        PartitionKeys:
+          - Name: region
+            Type: string
+          - Name: year
+            Type: string
+          - Name: month
+            Type: string
+          - Name: date
+            Type: string
+        StorageDescriptor:
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          Columns:
+            - Name: eventVersion
+              Type: string
+            - Name: userIdentity
+              Type:
+                !Join [
+                  ",",
+                  [
+                    "struct<",
+                    "type:string",
+                    "principalId:string",
+                    "arn:string",
+                    "accountId:string",
+                    "invokedBy:string",
+                    "accessKeyId:string",
+                    "userName:string",
+                    "sessionContext:",
+                    "struct<",
+                    "attributes:",
+                    "struct<",
+                    "mfaAuthenticated:string",
+                    "creationDate:string",
+                    ">",
+                    "sessionIssuer:",
+                    "struct<",
+                    "type:string",
+                    "principalId:string",
+                    "arn:string",
+                    "accountId:string",
+                    "userName: string",
+                    ">",
+                    ">",
+                    ">",
+                  ],
+                ]
+            - Name: eventTime
+              Type: string
+            - Name: eventSource
+              Type: string
+            - Name: eventName
+              Type: string
+            - Name: awsRegion
+              Type: string
+            - Name: sourceIpAddress
+              Type: string
+            - Name: userAgent
+              Type: string
+            - Name: errorCode
+              Type: string
+            - Name: errorMessage
+              Type: string
+            - Name: requestParameters
+              Type: string
+            - Name: responseElements
+              Type: string
+            - Name: additionalEventData
+              Type: string
+            - Name: requestId
+              Type: string
+            - Name: eventId
+              Type: string
+            - Name: resources
+              Type:
+                !Join [
+                  ",",
+                  [
+                    "array<",
+                    "struct<",
+                    "arn:string",
+                    "accountId:string",
+                    "type:string",
+                    ">",
+                    ">",
+                  ],
+                ]
+            - Name: eventType
+              Type: string
+            - Name: apiVersion
+              Type: string
+            - Name: readOnly
+              Type: string
+            - Name: recipientAccountId
+              Type: string
+            - Name: serviceEventDetails
+              Type: string
+            - Name: sharedEventID
+              Type: string
+            - Name: vpcEndpointId
+              Type: string
+          InputFormat: com.amazon.emr.cloudtrail.CloudTrailInputFormat
+          Location: !Sub s3://${SourceBucketName}/AWSLogs/${AWS::AccountId}/CloudTrail/
+          SerdeInfo:
+            Parameters:
+              paths:
+                !Join [
+                  ", ",
+                  [
+                    eventVersion,
+                    userIdentity,
+                    eventTime,
+                    eventSource,
+                    eventName,
+                    awsRegion,
+                    sourceIpAddress,
+                    userAgent,
+                    errorCode,
+                    errorMessage,
+                    requestParameters,
+                    responseElements,
+                    additionalEventData,
+                    requestId,
+                    eventId,
+                    resources,
+                    eventType,
+                    apiVersion,
+                    readOnly,
+                    recipientAccountId,
+                    serviceEventDetails,
+                    sharedEventID,
+                    vpcEndpointId,
+                  ],
+                ]
+            SerializationLibrary: com.amazon.emr.hive.serde.CloudTrailSerde

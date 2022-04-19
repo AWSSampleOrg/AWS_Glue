@@ -1,0 +1,16 @@
+{
+  "recommendations": [
+    "amazonwebservices.aws-toolkit-vscode",
+    "christian-kohler.path-intellisense",
+    "dbaeumer.vscode-eslint",
+    "DotJoshJohnson.xml",
+    "eamodio.gitlens",
+    "editorconfig.editorconfig",
+    "esbenp.prettier-vscode",
+    "firsttris.vscode-jest-runner",
+    "mhutchie.git-graph",
+    "shardulm94.trailing-spaces",
+    "streetsidesoftware.code-spell-checker",
+    "wix.vscode-import-cost"
+  ]
+}

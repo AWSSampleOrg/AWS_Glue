@@ -1,0 +1,63 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: "AWS::Serverless-2016-10-31"
+Parameters:
+  SourceBucketName:
+    Type: String
+
+Resources:
+  SourceBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${SourceBucketName}
+
+  GlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: sample_database
+
+  GlueTable:
+    DependsOn:
+      - GlueDatabase
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref GlueDatabase
+      TableInput:
+        Name: sample_table
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          {
+            "classification": "csv",
+            "skip.header.line.count": 1,
+            "serialization.encoding": "UTF8",
+          }
+        PartitionKeys:
+          - Name: partition_year
+            Type: string
+        StorageDescriptor:
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          Columns:
+            - Name: device_id
+              Type: string
+            - Name: uuid
+              Type: bigint
+            - Name: appid
+              Type: bigint
+            - Name: country
+              Type: string
+            - Name: year
+              Type: int
+            - Name: month
+              Type: int
+            - Name: date
+              Type: int
+            - Name: hour
+              Type: int
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          Location: !Sub s3://${SourceBucket}/
+          SerdeInfo:
+            Parameters:
+              field.delim: ","
+            SerializationLibrary: org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe

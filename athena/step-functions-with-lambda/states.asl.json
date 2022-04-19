@@ -1,0 +1,72 @@
+{
+  "Comment": "Comprehend Tutorial state machine",
+  "StartAt": "RevalidatePartitions",
+  "TimeoutSeconds": 3600,
+  "States": {
+    "RevalidatePartitions": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${RevalidatePartitionsLambda}",
+      "Next": "GetQuery",
+      "ResultPath": null,
+      "Catch": [
+        {
+          "ErrorEquals": ["QueryFailedException"],
+          "Next": "Failed"
+        }
+      ]
+    },
+    "GetQuery": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${GetQueryLambda}",
+      "Next": "StartQuery",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "Failed"
+        }
+      ]
+    },
+    "StartQuery": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::athena:startQueryExecution.sync",
+      "Parameters": {
+        "QueryString.$": "$.queryString",
+        "ResultConfiguration": {
+          "OutputLocation.$": "$.outputLocation"
+        }
+      },
+      "ResultSelector": {
+        "status.$": "$.QueryExecution.Status.State",
+        "queryExecutionId.$": "$.QueryExecution.QueryExecutionId"
+      },
+      "Next": "GetQueryResults",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "Failed"
+        }
+      ]
+    },
+    "GetQueryResults": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::athena:getQueryResults",
+      "Parameters": {
+        "QueryExecutionId.$": "$.queryExecutionId"
+      },
+      "ResultPath": "$.result",
+      "Next": "Succeed",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "Failed"
+        }
+      ]
+    },
+    "Failed": {
+      "Type": "Fail"
+    },
+    "Succeed": {
+      "Type": "Succeed"
+    }
+  }
+}

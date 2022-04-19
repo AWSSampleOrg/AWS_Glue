@@ -1,0 +1,173 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: "AWS::Serverless-2016-10-31"
+Resources:
+  DevicesRawDataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub devices-raw-data-${AWS::AccountId}-${AWS::Region}
+
+  DevicesDataAnalyticsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub devices-data-analytics-${AWS::AccountId}-${AWS::Region}
+
+  GlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: sample_database
+
+  DevicesRawDataGlueTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref GlueDatabase
+      TableInput:
+        Name: devices-raw-data-glue-table
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          {
+            "classification": "csv",
+            "skip.header.line.count": 1,
+            "serialization.encoding": "UTF8",
+          }
+        StorageDescriptor:
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          Columns:
+            - Name: 端末ID
+              Type: string
+            - Name: イベント日時
+              Type: bigint
+            - Name: 状態
+              Type: string
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          Location: !Sub s3://${DevicesRawDataBucket}/utf8-data
+          SerdeInfo:
+            Parameters:
+              field.delim: ","
+            SerializationLibrary: org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe
+
+  DevicesIntegratedDataGlueTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref GlueDatabase
+      TableInput:
+        Name: devices-integrated-data-glue-table
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          {
+            "classification": "csv",
+            "skip.header.line.count": 1,
+            "serialization.encoding": "UTF8",
+          }
+        StorageDescriptor:
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          Columns:
+            - Name: device_id
+              Type: string
+            - Name: timestamp
+              Type: bigint
+            - Name: status
+              Type: string
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          Location: !Sub s3://${DevicesDataAnalyticsBucket}/integrated-data
+          SerdeInfo:
+            Parameters:
+              field.delim: ","
+            SerializationLibrary: org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe
+
+  # ------------------------------------------------------------#
+  # IAM
+  # ------------------------------------------------------------#
+  GlueJobRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - glue.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Path: /
+      RoleName: GlueJobRole
+
+  # ------------------------------------------------------------#
+  # Glue ETL
+  # ------------------------------------------------------------#
+  DevicesETLGlueJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: devices-etl
+      Command:
+        Name: glueetl
+        PythonVersion: 3
+        ScriptLocation: !Sub s3://${DevicesDataAnalyticsBucket}/glue-job-script/devices-etl.py
+      DefaultArguments:
+        --job-language: python
+        --job-bookmark-option: job-bookmark-enable
+        --TempDir: !Sub s3://${DevicesDataAnalyticsBucket}/glue-job-temp-dir
+        --GLUE_DATABASE_NAME: !Sub ${GlueDatabase}
+        --SRC_GLUE_TABLE_NAME: !Sub ${DevicesRawDataGlueTable}
+        --DEST_GLUE_TABLE_NAME: !Sub ${DevicesIntegratedDataGlueTable}
+      GlueVersion: 2.0
+      ExecutionProperty:
+        MaxConcurrentRuns: 1
+      MaxRetries: 0
+      Role: !Ref GlueJobRole
+
+  DevicesSJIStoUTF8GlueJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: devices-sjis-to-utf8
+      Command:
+        Name: pythonshell
+        PythonVersion: 3
+        ScriptLocation: !Sub s3://${DevicesDataAnalyticsBucket}/glue-job-script/devices-sjis-to-utf8.py
+      DefaultArguments:
+        --TempDir: !Sub s3://${DevicesDataAnalyticsBucket}/glue-job-temp-dir
+        --BUCKET_NAME: !Sub ${DevicesRawDataBucket}
+        --SRC_OBJECT_KEY: sjis-data/raw-sjis-data.csv
+        --SRC_FILE_ENCODING: shift_jis
+        --DEST_OBJECT_PREFIX: utf8-data
+      ExecutionProperty:
+        MaxConcurrentRuns: 1
+      MaxRetries: 0
+      Role: !Ref GlueJobRole
+
+  GlueWorkflow:
+    Type: AWS::Glue::Workflow
+    Properties:
+      Name: devices-analytics-workflow
+
+  DevicesSJIStoUTF8JobGlueTrigger:
+    Type: AWS::Glue::Trigger
+    Properties:
+      WorkflowName: !Ref GlueWorkflow
+      Name: devices-sjis-to-utf8-job-glue-trigger
+      Type: ON_DEMAND
+      Actions:
+        - JobName: !Ref DevicesSJIStoUTF8GlueJob
+
+  DevicesETLJobGlueTrigger:
+    Type: AWS::Glue::Trigger
+    Properties:
+      WorkflowName: !Ref GlueWorkflow
+      Name: devices-etl-job-glue-trigger
+      Type: CONDITIONAL
+      Actions:
+        - JobName: !Ref DevicesETLGlueJob
+      Predicate:
+        Conditions:
+          - LogicalOperator: EQUALS
+            JobName: !Ref DevicesSJIStoUTF8GlueJob
+            State: SUCCEEDED
+      StartOnCreation: true
